@@ -1,3 +1,6 @@
+print("Script started")
+print("Sending request to Ollama...")
+
 import requests
 import json
 
@@ -8,7 +11,7 @@ def call_llama_ollama(prompt: str, model: str = DEFAULT_MODEL) -> str:
     payload = {
         "model": model,
         "prompt": prompt,
-        "stream": False,
+        "stream": True,
     }
 
     resp = requests.post(OLLAMA_URL, json=payload, timeout=600)
