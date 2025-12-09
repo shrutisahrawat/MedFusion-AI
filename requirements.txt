@@ -1,0 +1,61 @@
+# -------------------------------
+# FRONTEND
+# -------------------------------
+streamlit
+
+# -------------------------------
+# CORE ML / DL
+# -------------------------------
+torch
+torchvision
+numpy
+scikit-learn
+opencv-python
+Pillow
+
+# -------------------------------
+# MEDMNIST DATASETS
+# -------------------------------
+medmnist
+
+# -------------------------------
+# RAG + EMBEDDINGS
+# -------------------------------
+sentence-transformers
+faiss-cpu
+transformers
+accelerate
+
+# -------------------------------
+# PUBMED API
+# -------------------------------
+biopython
+requests
+
+# -------------------------------
+# PDF PROCESSING
+# -------------------------------
+pymupdf
+pdfplumber
+
+# -------------------------------
+# DATA HANDLING
+# -------------------------------
+pandas
+tqdm
+
+# -------------------------------
+# LOCAL LLM SUPPORT (OPTIONAL)
+# -------------------------------
+llama-cpp-python
+
+# -------------------------------
+# VISUALIZATION (OPTIONAL)
+# -------------------------------
+matplotlib
+seaborn
+
+# -------------------------------
+# UTILITIES
+# -------------------------------
+python-dotenv

@@ -1,0 +1,6 @@
+{
+  "llm_model_id": "hugging-quants/Meta-Llama-3.1-8B-Instruct-BNB-NF4",
+  "base_model_id": "meta-llama/Llama-3.1-8B-Instruct",
+  "max_new_tokens": 512,
+  "temperature": 0.3
+}
