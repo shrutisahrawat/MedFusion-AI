@@ -1,25 +1,25 @@
-print("Script started")
-print("Sending request to Ollama...")
-
 import requests
 import json
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-DEFAULT_MODEL = "llama3"
+DEFAULT_MODEL = "llama3:latest"
 
 def call_llama_ollama(prompt: str, model: str = DEFAULT_MODEL) -> str:
     payload = {
         "model": model,
         "prompt": prompt,
-        "stream": True,
+        "stream": False,
     }
 
-    resp = requests.post(OLLAMA_URL, json=payload, timeout=600)
+    resp = requests.post(
+        OLLAMA_URL,
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=600,
+    )
     resp.raise_for_status()
     data = resp.json()
-    # Ollama returns {"response": "...", ...}
     return data.get("response", "").strip()
-
 
 if __name__ == "__main__":
     system = (
