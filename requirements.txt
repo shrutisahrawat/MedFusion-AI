@@ -37,6 +37,8 @@ requests
 # -------------------------------
 pymupdf
 pdfplumber
+pypdf
+
 
 # -------------------------------
 # DATA HANDLING
