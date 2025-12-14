@@ -1,4 +1,4 @@
-# backend/vision/inference.py
+# Backend/vision/inference.py
 
 import torch
 import torch.nn as nn
@@ -41,7 +41,7 @@ ORGAN_LABELS = [
 ]
 
 # =====================
-# IMAGE TRANSFORM  (MUST BE BEFORE FUNCTIONS)
+# IMAGE TRANSFORM
 # =====================
 _transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -66,37 +66,33 @@ def _load_state_dict_any(ckpt):
 def load_chest_model():
     model = models.resnet18(weights=None)
     model.fc = nn.Linear(model.fc.in_features, 14)
-    ckpt = torch.load(CHEST_MODEL_PATH, map_location=DEVICE)
+    ckpt = torch.load(CHEST_MODEL_PATH, map_path=DEVICE)
     model.load_state_dict(_load_state_dict_any(ckpt))
-    model.to(DEVICE)
-    model.eval()
+    model.to(DEVICE).eval()
     return model
 
 def load_pneumonia_model():
     model = models.resnet18(weights=None)
     model.fc = nn.Linear(model.fc.in_features, 1)
-    ckpt = torch.load(PNEUMONIA_MODEL_PATH, map_location=DEVICE)
+    ckpt = torch.load(PNEUMONIA_MODEL_PATH, map_path=DEVICE)
     model.load_state_dict(_load_state_dict_any(ckpt))
-    model.to(DEVICE)
-    model.eval()
+    model.to(DEVICE).eval()
     return model
 
 def load_breast_model():
     model = models.resnet18(weights=None)
     model.fc = nn.Linear(model.fc.in_features, 1)
-    ckpt = torch.load(BREAST_MODEL_PATH, map_location=DEVICE)
+    ckpt = torch.load(BREAST_MODEL_PATH, map_path=DEVICE)
     model.load_state_dict(_load_state_dict_any(ckpt))
-    model.to(DEVICE)
-    model.eval()
+    model.to(DEVICE).eval()
     return model
 
 def load_organ_model():
     model = models.resnet18(weights=None)
     model.fc = nn.Linear(model.fc.in_features, 11)
-    ckpt = torch.load(ORGAN_MODEL_PATH, map_location=DEVICE)
+    ckpt = torch.load(ORGAN_MODEL_PATH, map_path=DEVICE)
     model.load_state_dict(_load_state_dict_any(ckpt))
-    model.to(DEVICE)
-    model.eval()
+    model.to(DEVICE).eval()
     return model
 
 # =====================
@@ -131,14 +127,14 @@ def get_organ_model():
         _organ_model = load_organ_model()
     return _organ_model
 
+
 # =====================
 # PREDICTIONS
 # =====================
 @torch.no_grad()
-def predict_chest_from_pil(pil_img: Image.Image, threshold: float = 0.5):
+def predict_chest_from_pil(pil_img: Image.Image, threshold=0.5):
     model = get_chest_model()
-    pil_img = pil_img.convert("RGB")
-    img = _transform(pil_img).unsqueeze(0).to(DEVICE)
+    img = _transform(pil_img.convert("RGB")).unsqueeze(0).to(DEVICE)
 
     logits = model(img)
     probs = torch.sigmoid(logits)[0].cpu().numpy()
@@ -159,37 +155,60 @@ def predict_chest_from_pil(pil_img: Image.Image, threshold: float = 0.5):
     }
 
 @torch.no_grad()
-def predict_pneumonia_from_pil(pil_img: Image.Image):
+def predict_pneumonia_from_pil(pil_img):
     model = get_pneumonia_model()
-    pil_img = pil_img.convert("RGB")
-    img = _transform(pil_img).unsqueeze(0).to(DEVICE)
+    img = _transform(pil_img.convert("RGB")).unsqueeze(0).to(DEVICE)
 
     prob = torch.sigmoid(model(img)[0][0]).item()
     label = "pneumonia" if prob >= 0.5 else "normal"
-
     return {"predicted_label": label, "confidence": float(prob)}
 
 @torch.no_grad()
-def predict_breast_from_pil(pil_img: Image.Image):
+def predict_breast_from_pil(pil_img):
     model = get_breast_model()
-    pil_img = pil_img.convert("RGB")
-    img = _transform(pil_img).unsqueeze(0).to(DEVICE)
+    img = _transform(pil_img.convert("RGB")).unsqueeze(0).to(DEVICE)
 
     prob = torch.sigmoid(model(img)[0][0]).item()
     label = "malignant" if prob >= 0.5 else "benign"
-
     return {"predicted_label": label, "confidence": float(prob)}
 
 @torch.no_grad()
-def predict_organ_from_pil(pil_img: Image.Image):
+def predict_organ_from_pil(pil_img):
     model = get_organ_model()
-    pil_img = pil_img.convert("RGB")
-    img = _transform(pil_img).unsqueeze(0).to(DEVICE)
+    img = _transform(pil_img.convert("RGB")).unsqueeze(0).to(DEVICE)
 
     probs = torch.softmax(model(img), dim=1)[0].cpu().numpy()
     idx = int(np.argmax(probs))
+    return {"predicted_label": ORGAN_LABELS[idx], "confidence": float(probs[idx])}
 
-    return {
-        "predicted_label": ORGAN_LABELS[idx],
-        "confidence": float(probs[idx])
-    }
+
+# =====================
+# SUMMARY BUILDERS (FOR LLM)
+# =====================
+def summarize_chest_results(pred):
+    active = pred["active_labels"]
+    if not active:
+        return "The chest X-ray model did not detect strong signs of abnormalities."
+
+    summary = "The model detected: " + ", ".join(
+        f"{x['label']} (prob={x['prob']:.2f})" for x in active
+    )
+    return summary + ". These are probability-based patterns from the ChestMNIST dataset."
+
+def summarize_pneumonia_results(pred):
+    return (
+        f"The pneumonia classifier predicted **{pred['predicted_label']}** "
+        f"with probability {pred['confidence']:.2f}. This is based on PneumoniaMNIST patterns."
+    )
+
+def summarize_breast_results(pred):
+    return (
+        f"The breast tumor classifier predicted **{pred['predicted_label']}** "
+        f"with probability {pred['confidence']:.2f}. This reflects statistical features from BreastMNIST."
+    )
+
+def summarize_organ_results(pred):
+    return (
+        f"The OrganMNIST classifier predicted **{pred['predicted_label']}** "
+        f"with probability {pred['confidence']:.2f} based on CT slice patterns."
+    )

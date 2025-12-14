@@ -1,78 +1,64 @@
-# backend/llm/llama_client.py
+# Backend/llm/llama_client.py
 
 """
-LLaMA client wrapper for MedFusion AI.
+LLaMA client wrapper for MedFusion AI using Ollama HTTP API.
 
-- Loads a local quantized LLaMA model via llama-cpp-python.
+- Uses local Ollama server (no GGUF / no llama-cpp required).
 - Applies safety guards BEFORE and AFTER calling the model.
-- Uses prompt builders from backend/llm/prompt.py.
+- Uses prompt builders from Backend/llm/prompt.py.
+- Fully Python 3.9 compatible.
 """
 
 import os
-from typing import List
+from typing import List, Optional
 
-from llama_cpp import Llama
+import requests
 
-from backend.llm.prompt import (
+from Backend.llm.prompt import (
     BASE_SYSTEM_PROMPT,
     build_text_rag_prompt,
     build_vision_prompt,
     build_pdf_prompt,
 )
-from backend.safety.guards import safety_input_filter, sanitize_output
+from Backend.safety.guards import safety_input_filter, sanitize_output
 
 
-# ---------- Model configuration ----------
+# ---------- Ollama configuration ----------
 
-# You can set this via environment variable, or hard-code your .gguf path here
-DEFAULT_MODEL_PATH = os.environ.get(
-    "LLAMA_MODEL_PATH",
-    "models/llama/llama-3.1-8b-instruct.Q4_K_M.gguf",  # <- adjust to your folder
-)
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3")
 
 MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "512"))
 TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.2"))
 
-# Global singleton instance
-_llm: Llama | None = None
-
-
-def get_llm() -> Llama:
-    """
-    Lazy-load a single LLaMA model instance.
-    """
-    global _llm
-    if _llm is None:
-        if not os.path.exists(DEFAULT_MODEL_PATH):
-            raise FileNotFoundError(
-                f"LLaMA model file not found at: {DEFAULT_MODEL_PATH}\n"
-                "Please download a quantized .gguf model and update LLAMA_MODEL_PATH."
-            )
-
-        _llm = Llama(
-            model_path=DEFAULT_MODEL_PATH,
-            n_ctx=4096,
-            logits_all=False,
-            n_threads=4,   # adjust based on your CPU cores
-            use_mlock=False,
-            verbose=False,
-        )
-    return _llm
-
 
 def _generate(system_prompt: str, user_prompt: str) -> str:
     """
-    Low-level text generation helper.
+    Low-level text generation helper using Ollama.
     """
-    llm = get_llm()
-    prompt = f"<|system|>\n{system_prompt}\n<|user|>\n{user_prompt}\n<|assistant|>\n"
-    output = llm(
-        prompt,
-        max_tokens=MAX_TOKENS,
-        temperature=TEMPERATURE,
-        stop=["<|user|>", "<|system|>", "</s>"],
+    full_prompt = f"<|system|>\n{system_prompt}\n<|user|>\n{user_prompt}\n<|assistant|>\n"
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": full_prompt,
+        "stream": False,
+        "options": {
+            "temperature": TEMPERATURE,
+            "num_predict": MAX_TOKENS,
+        },
+    }
+
+    resp = requests.post(
+        OLLAMA_URL,
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=600,
     )
-    text = output["choices"][0]["text"]
+    resp.raise_for_status()
+    data = resp.json()
+
+    # Different Ollama versions may use "response" or "text"
+    text = data.get("response") or data.get("text") or ""
     return text.strip()
 
 
@@ -83,7 +69,6 @@ def generate_text_rag_answer(context_chunks: List[str], user_question: str) -> s
     Use PubMed RAG context + user question to generate an answer.
     Applies input filtering and output sanitization.
     """
-    # Input safety
     blocked = safety_input_filter(user_question)
     if blocked is not None:
         return blocked
@@ -95,28 +80,47 @@ def generate_text_rag_answer(context_chunks: List[str], user_question: str) -> s
 
 
 def generate_vision_answer(
-    chest_summary: str | None,
-    fracture_summary: str | None,
-    user_description: str | None,
+    chest_summary: Optional[str],
+    breast_summary: Optional[str],
+    pneumonia_summary: Optional[str],
+    organ_summary: Optional[str],
+    user_description: Optional[str],
 ) -> str:
     """
-    Use vision model summaries + optional user description to generate explanation.
+    Use vision model summaries (ChestMNIST, BreastMNIST, PneumoniaMNIST, OrganAMNIST)
+    plus optional user description to generate a cautious explanation.
     """
     combined_text = " ".join(
-        [t for t in [chest_summary, fracture_summary, user_description] if t]
+        [
+            t
+            for t in [
+                chest_summary,
+                breast_summary,
+                pneumonia_summary,
+                organ_summary,
+                user_description,
+            ]
+            if t
+        ]
     )
 
     blocked = safety_input_filter(combined_text)
     if blocked is not None:
         return blocked
 
-    user_prompt = build_vision_prompt(chest_summary, fracture_summary, user_description)
+    user_prompt = build_vision_prompt(
+        chest_summary,
+        breast_summary,
+        pneumonia_summary,
+        organ_summary,
+        user_description,
+    )
     raw = _generate(BASE_SYSTEM_PROMPT, user_prompt)
     safe = sanitize_output(raw)
     return safe
 
 
-def generate_pdf_answer(report_text: str, user_question: str | None) -> str:
+def generate_pdf_answer(report_text: str, user_question: Optional[str]) -> str:
     """
     Explain a medical report (PDF text) in simple language.
     """

@@ -1,41 +1,50 @@
-# backend/llm/prompt.py
+# Backend/llm/prompt.py
+from typing import Optional
 
 """
 Prompt builder utilities for MedFusion AI.
 
 These functions build structured prompts for:
 - Text RAG (PubMed)
-- Vision (ChestMNIST + FractureMNIST3D)
+- Vision (ChestMNIST / BreastMNIST / PneumoniaMNIST / OrganAMNIST)
 - PDF report understanding
 
-They are used by backend/llm/llama_client.py.
+This file is fully Python 3.9 compatible and follows strict medical safety rules.
 """
 
+# ---------------- GLOBAL SAFETY DISCLAIMER ----------------
+
 DEFAULT_DISCLAIMER = (
-    "⚠️ This system is for assistance and knowledge purposes only.\n"
+    "⚠️ This system is for educational and assistance purposes only.\n"
     "It is NOT a doctor and may make mistakes.\n"
-    "Please consult a qualified doctor or medical professional for real medical advice."
+    "It does NOT provide medical diagnosis, prescriptions, or treatment plans.\n"
+    "Always consult a qualified doctor or healthcare professional for real medical advice."
 )
 
 BASE_SYSTEM_PROMPT = f"""
 You are an AI assistant in a student research project called MedFusion AI.
 
-You are NOT a doctor and this system is NOT a medical device or diagnostic tool.
+You are NOT a doctor and this system is NOT a certified medical device.
 
-General rules:
-- Use only the provided context: PubMed snippets, vision model outputs, or report text.
-- Explain findings in simple, non-technical language for laypersons.
-- Do NOT make a definitive diagnosis.
-- Do NOT suggest specific medicines, brand names, or exact dosages.
-- Do NOT override or contradict doctors, lab reports, or imaging reports.
-- When unsure, say you are not certain and recommend consulting a qualified doctor.
-- Always encourage users to talk to a real doctor for final decisions.
+STRICT SAFETY RULES (MUST ALWAYS FOLLOW):
+- Provide information ONLY for education and general awareness.
+- Do NOT provide medical diagnosis or confirmation of disease.
+- Do NOT prescribe medicines, drug names, injections, or dosages.
+- Do NOT provide emergency medical instructions.
+- Do NOT assist with unsafe medical practices.
+- Always remind users to consult a qualified doctor for final decisions.
+- If uncertain, clearly say you are not sure.
 
-Always behave cautiously and conservatively.
+COMMUNICATION STYLE:
+- Simple, calm, respectful, and non-alarming.
+- Layperson-friendly language.
+- Conservative and cautious tone.
+
+{DEFAULT_DISCLAIMER}
 """.strip()
 
 
-# ---------- TEXT RAG (PubMed) ----------
+# ---------------- TEXT RAG (PUBMED) ----------------
 
 def build_text_rag_prompt(context_chunks, user_question: str) -> str:
     """
@@ -47,7 +56,7 @@ def build_text_rag_prompt(context_chunks, user_question: str) -> str:
         context_block += f"[CONTEXT {i}]\n{chunk}\n\n"
 
     user_prompt = f"""
-You are given several context snippets from PubMed articles.
+You are given multiple scientific context snippets from PubMed articles.
 
 {context_block}
 
@@ -55,71 +64,88 @@ USER QUESTION:
 {user_question}
 
 TASK:
-- Answer the question using ONLY the information from the context snippets above.
-- Summarize relevant points in simple, understandable terms.
-- Clearly mention that you are not giving a diagnosis or prescription.
-- If the context does not fully answer the question, say that more information or a doctor's evaluation is needed.
-- Suggest what type of doctor/specialist could be consulted, if appropriate.
-- Do not list or recommend specific drug names or dosages.
+- Answer ONLY using the provided context snippets.
+- Summarize relevant facts in simple and easy language.
+- Do NOT make a medical diagnosis.
+- Do NOT suggest specific medicines, brand names, or drug dosages.
+- Clearly remind that this is not medical advice.
+- If the context is insufficient, say that medical evaluation is required.
+- If appropriate, mention what type of doctor (e.g., pulmonologist, radiologist, oncologist) may be consulted.
 """
     return user_prompt.strip()
 
 
-# ---------- VISION (ChestMNIST / FractureMNIST3D) ----------
+# ---------------- VISION (CHEST / BREAST / PNEUMONIA / ORGAN) ----------------
 
 def build_vision_prompt(
-    chest_summary: str | None,
-    fracture_summary: str | None,
-    user_description: str | None,
+    chest_summary: Optional[str],
+    breast_summary: Optional[str],
+    pneumonia_summary: Optional[str],
+    organ_summary: Optional[str],
+    user_description: Optional[str],
 ) -> str:
     """
-    chest_summary: text summarising model's chest findings (labels + probs)
-    fracture_summary: text summarising model's fracture findings
-    user_description: optional free-text description from user
+    chest_summary: summary of ChestMNIST predictions (e.g., chest X-ray findings)
+    breast_summary: summary of BreastMNIST predictions (e.g., breast lesion patterns)
+    pneumonia_summary: summary of PneumoniaMNIST predictions (e.g., pneumonia vs normal)
+    organ_summary: summary of OrganAMNIST predictions (e.g., organ region classification)
+    user_description: optional free-text input from user (symptoms, history, etc.)
     """
 
-    vision_block = "Vision model outputs (from simulated MedMNIST-based models):\n"
+    vision_block = "Vision model outputs (from educational MedMNIST-based models):\n"
+
     if chest_summary:
-        vision_block += f"- Chest X-ray model summary: {chest_summary}\n"
-    if fracture_summary:
-        vision_block += f"- Fracture scan model summary: {fracture_summary}\n"
+        vision_block += f"- Chest model summary (ChestMNIST): {chest_summary}\n"
+
+    if breast_summary:
+        vision_block += f"- Breast model summary (BreastMNIST): {breast_summary}\n"
+
+    if pneumonia_summary:
+        vision_block += f"- Pneumonia model summary (PneumoniaMNIST): {pneumonia_summary}\n"
+
+    if organ_summary:
+        vision_block += f"- Organ model summary (OrganAMNIST): {organ_summary}\n"
 
     if user_description:
-        vision_block += f"\nAdditional description from user:\n{user_description}\n"
+        vision_block += f"\nAdditional user description:\n{user_description}\n"
 
     user_prompt = f"""
 {vision_block}
 
 TASK:
-- Explain these model outputs in general, high-level terms.
-- Use careful language: these are only patterns seen by a small model trained on a limited dataset.
-- Do NOT treat this as a diagnosis, even if the probabilities are high.
-- Do NOT recommend medications, exact dosages, or specific treatment protocols.
-- You may suggest general next steps, like "talk to a radiologist", "consult an orthopedician", or "consult a pulmonologist", etc.
-- You may suggest gentle, generic lifestyle measures (sleep, hydration, posture, breathing exercises, etc.) but keep them non-specific.
-- Explicitly remind the user to consult a doctor and not rely only on this system.
+- Explain what these model outputs MAY indicate in very general terms.
+- Emphasize that these are only patterns from small educational AI models trained on MedMNIST subsets.
+- They are NOT a diagnosis and may be incorrect.
+- Do NOT recommend medicines, surgeries, injections, or detailed treatment plans.
+- You may suggest general next steps such as:
+  - "Consult a radiologist" (for imaging),
+  - "Consult a pulmonologist" (for lung findings),
+  - "Consult an oncologist" (for suspected tumors),
+  - "Consult a gastroenterologist / general physician" (for abdominal/organ findings).
+- You may suggest very general lifestyle advice like rest, hydration, basic posture care, but keep it non-specific.
+- Clearly remind users to consult a doctor and not rely only on this system.
 """
     return user_prompt.strip()
 
 
-# ---------- PDF REPORT ----------
+# ---------------- PDF MEDICAL REPORT ----------------
 
-def build_pdf_prompt(report_text: str, user_question: str | None) -> str:
+def build_pdf_prompt(report_text: str, user_question: Optional[str]) -> str:
     """
-    report_text: full extracted report text (possibly OCR, noisy)
+    report_text: extracted raw medical report text (OCR may be noisy)
     user_question: optional user question about the report
     """
+
     if not user_question or not user_question.strip():
         user_question = (
-            "Explain this medical report in simple language, including what body parts are involved and "
-            "what these findings might generally indicate."
+            "Explain this medical report in simple language and describe what body parts are involved."
         )
 
-    # truncate long report for safety
+    # Truncate long reports for safety and token limits
     truncated_report = report_text[:6000]
 
     user_prompt = f"""
-You are given text extracted from a medical report (it may contain noise or OCR errors):
+You are given text extracted from a medical report:
 
 [REPORT TEXT START]
 {truncated_report}
@@ -129,10 +155,10 @@ USER QUESTION:
 {user_question}
 
 TASK:
-- Identify and explain the key findings in simple, layperson-friendly language.
-- Clarify what body parts, organs, or systems are being discussed.
-- Explain general possible implications without calling it a confirmed diagnosis.
-- Do NOT suggest exact medicines, dosages, or treatment plans.
-- Encourage the user to ask the referring doctor or a relevant specialist to interpret the report fully.
+- Explain the main findings in simple, non-technical words.
+- Mention which organs or body parts are discussed.
+- Explain possible general meaning without calling it a confirmed diagnosis.
+- Do NOT suggest medications, dosages, therapies, or treatments.
+- Encourage consulting the referring doctor or relevant specialist.
 """
     return user_prompt.strip()
