@@ -1,164 +1,258 @@
 # Backend/llm/prompt.py
-from typing import Optional
+from typing import Optional, List
 
-"""
-Prompt builder utilities for MedFusion AI.
 
-These functions build structured prompts for:
-- Text RAG (PubMed)
-- Vision (ChestMNIST / BreastMNIST / PneumoniaMNIST / OrganAMNIST)
-- PDF report understanding
-
-This file is fully Python 3.9 compatible and follows strict medical safety rules.
-"""
-
-# ---------------- GLOBAL SAFETY DISCLAIMER ----------------
-
+# =====================================================
+# GLOBAL DISCLAIMER
+# =====================================================
 DEFAULT_DISCLAIMER = (
-    "⚠️ This system is for educational and assistance purposes only.\n"
+    "⚠️ This system is for educational assistance only.\n"
     "It is NOT a doctor and may make mistakes.\n"
-    "It does NOT provide medical diagnosis, prescriptions, or treatment plans.\n"
-    "Always consult a qualified doctor or healthcare professional for real medical advice."
+    "It does NOT diagnose conditions or prescribe treatments.\n"
+    "Always consult a qualified medical professional for real medical advice."
 )
 
+
+# =====================================================
+# BASE SYSTEM PROMPT
+# =====================================================
 BASE_SYSTEM_PROMPT = f"""
-You are an AI assistant in a student research project called MedFusion AI.
+You are MedFusion-AI — an educational assistant designed to explain medical concepts clearly.
 
-You are NOT a doctor and this system is NOT a certified medical device.
-
-STRICT SAFETY RULES (MUST ALWAYS FOLLOW):
-- Provide information ONLY for education and general awareness.
-- Do NOT provide medical diagnosis or confirmation of disease.
-- Do NOT prescribe medicines, drug names, injections, or dosages.
-- Do NOT provide emergency medical instructions.
-- Do NOT assist with unsafe medical practices.
-- Always remind users to consult a qualified doctor for final decisions.
-- If uncertain, clearly say you are not sure.
+STRICT SAFETY RULES:
+- DO NOT diagnose diseases.
+- DO NOT prescribe medicines or treatments.
+- DO NOT provide emergency instructions.
+- State uncertainty when evidence is limited.
+- Encourage consulting a medical professional.
 
 COMMUNICATION STYLE:
-- Simple, calm, respectful, and non-alarming.
-- Layperson-friendly language.
-- Conservative and cautious tone.
+- Answer like a knowledgeable teacher, not a researcher.
+- Start with a clear, simple explanation.
+- Use PubMed evidence ONLY to support explanations.
+- Avoid listing studies, papers, or case reports.
+- Avoid copying or summarizing abstracts.
 
 {DEFAULT_DISCLAIMER}
 """.strip()
 
 
-# ---------------- TEXT RAG (PUBMED) ----------------
-
-def build_text_rag_prompt(context_chunks, user_question: str) -> str:
+# =====================================================
+# USER-FOCUSED QUESTION GUIDE  🔥 IMPORTANT
+# =====================================================
+def build_user_focused_question(user_question: str) -> str:
     """
-    context_chunks: list of strings (chunks of PubMed text)
-    user_question: the original user query
+    Guides the LLM to explain concepts clearly and completely
+    using PubMed as background support.
     """
-    context_block = ""
-    for i, chunk in enumerate(context_chunks, start=1):
-        context_block += f"[CONTEXT {i}]\n{chunk}\n\n"
 
-    user_prompt = f"""
-You are given multiple scientific context snippets from PubMed articles.
+    return f"""
+Answer the following question for a general, non-medical user.
 
-{context_block}
+RESPONSE STRUCTURE (FOLLOW THIS):
+1. Start with a clear, direct definition.
+2. Explain what happens inside the body (simple biology).
+3. Mention common causes (high-level).
+4. Mention common symptoms (non-alarming).
+5. Briefly mention who may be at higher risk (if relevant).
+6. Use PubMed research ONLY to support explanations (typically 2–3 relevant PMIDs).
+7. Prefer review articles or consensus-level evidence when available.
+
+
+IMPORTANT RULES:
+- Do NOT list studies or case reports.
+- Do NOT summarize abstracts.
+- Do NOT mention rare complications unless asked.
+- Keep the explanation calm, simple, and educational.
 
 USER QUESTION:
 {user_question}
+""".strip()
 
-TASK:
-- Answer ONLY using the provided context snippets.
-- Summarize relevant facts in simple and easy language.
-- Do NOT make a medical diagnosis.
-- Do NOT suggest specific medicines, brand names, or drug dosages.
-- Clearly remind that this is not medical advice.
-- If the context is insufficient, say that medical evaluation is required.
-- If appropriate, mention what type of doctor (e.g., pulmonologist, radiologist, oncologist) may be consulted.
+
+
+# =====================================================
+# 1. PUBMED RAG PROMPT (FIXED)
+# =====================================================
+def build_pubmed_rag_prompt(
+    context_records: List[dict],
+    guided_question: str,
+    history: Optional[str],
+    bookshelf_text: Optional[str] = None,
+) -> str:
+    """
+    Builds a clean, user-facing RAG prompt.
+    Bookshelf = foundation
+    PubMed = evidence
+    """
+
+    history_block = f"\nPrevious conversation:\n{history}\n" if history else ""
+
+    # 📘 Bookshelf (FOUNDATION)
+    bookshelf_block = ""
+    if bookshelf_text:
+        bookshelf_block = f"""
+FOUNDATIONAL MEDICAL EXPLANATION (from standard medical references):
+{bookshelf_text}
 """
-    return user_prompt.strip()
+
+    # 📄 PubMed (SUPPORTING EVIDENCE)
+    evidence_lines = []
+    seen_pmids = set()
+
+    for rec in context_records:
+        pmid = rec.get("pmid")
+        text = rec.get("text", "").strip()
+
+        if pmid and pmid not in seen_pmids:
+            evidence_lines.append(f"- {text} (PMID {pmid})")
+            seen_pmids.add(pmid)
+
+        if len(seen_pmids) >= 3:   # 🔥 force 2–3 PMIDs max
+            break
+
+    evidence_block = "\n".join(evidence_lines)
+
+    return f"""
+{history_block}
+
+You are answering a medical question for a general user.
+
+{bookshelf_block}
+
+SUPPORTING RESEARCH EVIDENCE (PubMed):
+{evidence_block}
+
+{guided_question}
+
+IMPORTANT:
+- Explain naturally, like a medical educator.
+- Do NOT mention studies, trials, or paper titles.
+- Do NOT copy abstracts.
+- Use PubMed only to support the explanation.
+- End with the disclaimer.
+
+{DEFAULT_DISCLAIMER}
+""".strip()
 
 
-# ---------------- VISION (CHEST / BREAST / PNEUMONIA / ORGAN) ----------------
 
+# =====================================================
+# 2. VISION EXPLANATION PROMPT
+# =====================================================
 def build_vision_prompt(
     chest_summary: Optional[str],
     breast_summary: Optional[str],
     pneumonia_summary: Optional[str],
     organ_summary: Optional[str],
-    user_description: Optional[str],
+    user_description: Optional[str] = None
 ) -> str:
-    """
-    chest_summary: summary of ChestMNIST predictions (e.g., chest X-ray findings)
-    breast_summary: summary of BreastMNIST predictions (e.g., breast lesion patterns)
-    pneumonia_summary: summary of PneumoniaMNIST predictions (e.g., pneumonia vs normal)
-    organ_summary: summary of OrganAMNIST predictions (e.g., organ region classification)
-    user_description: optional free-text input from user (symptoms, history, etc.)
-    """
 
-    vision_block = "Vision model outputs (from educational MedMNIST-based models):\n"
+    blocks = []
 
     if chest_summary:
-        vision_block += f"- Chest model summary (ChestMNIST): {chest_summary}\n"
-
+        blocks.append(f"Chest X-ray Model: {chest_summary}")
     if breast_summary:
-        vision_block += f"- Breast model summary (BreastMNIST): {breast_summary}\n"
-
+        blocks.append(f"Breast Model: {breast_summary}")
     if pneumonia_summary:
-        vision_block += f"- Pneumonia model summary (PneumoniaMNIST): {pneumonia_summary}\n"
-
+        blocks.append(f"Pneumonia Model: {pneumonia_summary}")
     if organ_summary:
-        vision_block += f"- Organ model summary (OrganAMNIST): {organ_summary}\n"
+        blocks.append(f"Organ CT Model: {organ_summary}")
+
+    vision_block = "\n".join(f"- {b}" for b in blocks)
 
     if user_description:
-        vision_block += f"\nAdditional user description:\n{user_description}\n"
+        vision_block += f"\n\nUser notes:\n{user_description}"
 
-    user_prompt = f"""
+    return f"""
+The system produced the following educational model outputs:
+
 {vision_block}
 
 TASK:
-- Explain what these model outputs MAY indicate in very general terms.
-- Emphasize that these are only patterns from small educational AI models trained on MedMNIST subsets.
-- They are NOT a diagnosis and may be incorrect.
-- Do NOT recommend medicines, surgeries, injections, or detailed treatment plans.
-- You may suggest general next steps such as:
-  - "Consult a radiologist" (for imaging),
-  - "Consult a pulmonologist" (for lung findings),
-  - "Consult an oncologist" (for suspected tumors),
-  - "Consult a gastroenterologist / general physician" (for abdominal/organ findings).
-- You may suggest very general lifestyle advice like rest, hydration, basic posture care, but keep it non-specific.
-- Clearly remind users to consult a doctor and not rely only on this system.
-"""
-    return user_prompt.strip()
+- Follow the response structure exactly.
+- Explain the concept clearly and completely in plain language.
+- Use PubMed ONLY as background support and it should be relevant to user question.
+- DO NOT describe studies, research designs, cohorts, or findings.
+- DO NOT say phrases like:
+  “a study found”, “research shows”, “according to a study”.
+- If citing PubMed, do so briefly and passively, e.g.:
+  “This understanding is supported by medical literature (PMID XXXXX).”
+- Mention at most THREE PMID for definition-style questions.
+- Focus on understanding, not research analysis.
+- End with the disclaimer ONCE.
 
 
-# ---------------- PDF MEDICAL REPORT ----------------
 
-def build_pdf_prompt(report_text: str, user_question: Optional[str]) -> str:
-    """
-    report_text: extracted raw medical report text (OCR may be noisy)
-    user_question: optional user question about the report
-    """
+{DEFAULT_DISCLAIMER}
+""".strip()
 
-    if not user_question or not user_question.strip():
-        user_question = (
-            "Explain this medical report in simple language and describe what body parts are involved."
-        )
 
-    # Truncate long reports for safety and token limits
-    truncated_report = report_text[:6000]
+# =====================================================
+# 3. LATE FUSION PROMPT (VISION + PUBMED)
+# =====================================================
+def build_fusion_prompt(
+    vision_summary: str,
+    context_records: List[dict],
+    user_question: str,
+    history: Optional[str] = None
+) -> str:
 
-    user_prompt = f"""
-You are given text extracted from a medical report:
+    evidence = ""
+    for rec in context_records:
+        pmid = rec.get("pmid", "N/A")
+        text = rec.get("text", "").strip()
+        evidence += f"- PMID {pmid}: {text}\n"
 
-[REPORT TEXT START]
-{truncated_report}
-[REPORT TEXT END]
+    history_block = f"\nPREVIOUS CONVERSATION:\n{history}\n" if history else ""
+
+    return f"""
+{history_block}
+
+VISION SUMMARY:
+{vision_summary}
+
+PUBMED BACKGROUND (supporting only):
+{evidence}
 
 USER QUESTION:
 {user_question}
 
 TASK:
-- Explain the main findings in simple, non-technical words.
-- Mention which organs or body parts are discussed.
-- Explain possible general meaning without calling it a confirmed diagnosis.
-- Do NOT suggest medications, dosages, therapies, or treatments.
-- Encourage consulting the referring doctor or relevant specialist.
-"""
-    return user_prompt.strip()
+- Combine vision insights with research knowledge.
+- Explain in simple language.
+- Do NOT list studies or abstracts.
+- Mention PMIDs sparingly and naturally.
+- Avoid diagnosis or treatment advice.
+
+{DEFAULT_DISCLAIMER}
+""".strip()
+
+
+# =====================================================
+# 4. PDF REPORT PROMPT
+# =====================================================
+def build_pdf_prompt(report_text: str, user_question: Optional[str]) -> str:
+
+    if not user_question or not user_question.strip():
+        user_question = "Explain this medical report in simple language."
+
+    truncated = report_text[:6000]
+
+    return f"""
+You are given a medical report:
+
+[REPORT START]
+{truncated}
+[REPORT END]
+
+USER QUESTION:
+{user_question}
+
+TASK:
+- Explain the report in simple terms.
+- Describe which organs or systems are involved.
+- Do NOT diagnose or suggest treatment.
+
+{DEFAULT_DISCLAIMER}
+""".strip()

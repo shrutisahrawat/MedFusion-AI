@@ -1,42 +1,56 @@
 # Backend/llm/llama_client.py
 
-"""
-LLaMA client wrapper for MedFusion AI using Ollama HTTP API.
-
-- Uses local Ollama server (no GGUF / no llama-cpp required).
-- Applies safety guards BEFORE and AFTER calling the model.
-- Uses prompt builders from Backend/llm/prompt.py.
-- Fully Python 3.9 compatible.
-"""
-
 import os
 from typing import List, Optional
-
 import requests
 
 from Backend.llm.prompt import (
     BASE_SYSTEM_PROMPT,
-    build_text_rag_prompt,
+    build_pubmed_rag_prompt,
+    build_user_focused_question,
     build_vision_prompt,
+    build_fusion_prompt,
     build_pdf_prompt,
 )
 from Backend.safety.guards import safety_input_filter, sanitize_output
 
 
-# ---------- Ollama configuration ----------
-
+# =============================================================
+# Ollama configuration
+# =============================================================
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3")
 
-MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "512"))
-TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.2"))
+MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "800"))
+TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.12"))
 
 
+# =============================================================
+# Conversation memory (bounded, clean)
+# =============================================================
+MAX_TURNS = 4
+conversation_history: List[str] = []
+
+
+def _append_history(user_q: str, assistant_a: str):
+    conversation_history.append(f"User: {user_q}\nAssistant: {assistant_a}")
+    if len(conversation_history) > MAX_TURNS:
+        conversation_history.pop(0)
+
+
+def _history_text() -> str:
+    return "\n\n".join(conversation_history)
+
+
+# =============================================================
+# Low-level generator
+# =============================================================
 def _generate(system_prompt: str, user_prompt: str) -> str:
-    """
-    Low-level text generation helper using Ollama.
-    """
-    full_prompt = f"<|system|>\n{system_prompt}\n<|user|>\n{user_prompt}\n<|assistant|>\n"
+    full_prompt = (
+        f"<|system|>\n{system_prompt}"
+        f"\n<|user|>\n{user_prompt}"
+        f"\n<|assistant|>\n"
+    )
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -48,37 +62,79 @@ def _generate(system_prompt: str, user_prompt: str) -> str:
         },
     }
 
-    resp = requests.post(
-        OLLAMA_URL,
-        json=payload,
-        headers={"Content-Type": "application/json"},
-        timeout=600,
-    )
+    resp = requests.post(OLLAMA_URL, json=payload, timeout=600)
     resp.raise_for_status()
+
     data = resp.json()
-
-    # Different Ollama versions may use "response" or "text"
-    text = data.get("response") or data.get("text") or ""
-    return text.strip()
+    return (data.get("response") or data.get("text") or "").strip()
 
 
-# ---------- High-level functions ----------
-
-def generate_text_rag_answer(context_chunks: List[str], user_question: str) -> str:
+# =============================================================
+# 1️⃣ PubMed RAG Answer — CLEAN & CORRECT
+# =============================================================
+def generate_text_rag_answer(
+    context_records: List[dict],   # [{"text": ..., "pmid": ...}]
+    user_question: str,
+    bookshelf_text: Optional[str] = None,
+) -> str:
     """
-    Use PubMed RAG context + user question to generate an answer.
-    Applies input filtering and output sanitization.
+    Clean medical explanation:
+    - Explanation first
+    - PubMed supports claims
+    - 2–3 PMIDs max
+    - NO prompt leakage
     """
+
+    # Safety
     blocked = safety_input_filter(user_question)
-    if blocked is not None:
+    if blocked:
         return blocked
 
-    user_prompt = build_text_rag_prompt(context_chunks, user_question)
-    raw = _generate(BASE_SYSTEM_PROMPT, user_prompt)
+    # ----------------------------------
+    # Prepare PubMed evidence cleanly
+    # ----------------------------------
+    evidence_records = []
+    seen_pmids = set()
+
+    for rec in context_records:
+        pmid = rec.get("pmid")
+        text = rec.get("text", "").strip()
+
+        if pmid and pmid not in seen_pmids:
+            evidence_records.append({
+                "pmid": pmid,
+                "text": text
+            })
+            seen_pmids.add(pmid)
+
+        if len(seen_pmids) >= 3:
+            break
+
+    # ----------------------------------
+    # Build guided question
+    # ----------------------------------
+    guided_question = build_user_focused_question(user_question)
+
+    # ----------------------------------
+    # Build final prompt (NO SEPARATORS)
+    # ----------------------------------
+    prompt = build_pubmed_rag_prompt(
+        context_records=evidence_records,
+        guided_question=guided_question,
+        history=_history_text(),
+        bookshelf_text=bookshelf_text,
+    )
+
+    raw = _generate(BASE_SYSTEM_PROMPT, prompt)
     safe = sanitize_output(raw)
+
+    _append_history(user_question, safe)
     return safe
 
 
+# =============================================================
+# 2️⃣ Vision-only Explanation
+# =============================================================
 def generate_vision_answer(
     chest_summary: Optional[str],
     breast_summary: Optional[str],
@@ -86,51 +142,72 @@ def generate_vision_answer(
     organ_summary: Optional[str],
     user_description: Optional[str],
 ) -> str:
-    """
-    Use vision model summaries (ChestMNIST, BreastMNIST, PneumoniaMNIST, OrganAMNIST)
-    plus optional user description to generate a cautious explanation.
-    """
-    combined_text = " ".join(
-        [
-            t
-            for t in [
-                chest_summary,
-                breast_summary,
-                pneumonia_summary,
-                organ_summary,
-                user_description,
-            ]
-            if t
-        ]
+
+    combined = " ".join(
+        x for x in [
+            chest_summary,
+            breast_summary,
+            pneumonia_summary,
+            organ_summary,
+            user_description,
+        ] if x
     )
 
-    blocked = safety_input_filter(combined_text)
-    if blocked is not None:
+    blocked = safety_input_filter(combined)
+    if blocked:
         return blocked
 
-    user_prompt = build_vision_prompt(
+    prompt = build_vision_prompt(
         chest_summary,
         breast_summary,
         pneumonia_summary,
         organ_summary,
         user_description,
     )
-    raw = _generate(BASE_SYSTEM_PROMPT, user_prompt)
-    safe = sanitize_output(raw)
-    return safe
+
+    raw = _generate(BASE_SYSTEM_PROMPT, prompt)
+    return sanitize_output(raw)
 
 
-def generate_pdf_answer(report_text: str, user_question: Optional[str]) -> str:
-    """
-    Explain a medical report (PDF text) in simple language.
-    """
-    combined_input = (user_question or "") + " " + report_text[:500]
-
-    blocked = safety_input_filter(combined_input)
-    if blocked is not None:
+# =============================================================
+# 3️⃣ Late Fusion (Vision + PubMed)
+# =============================================================
+def generate_fusion_answer(
+    vision_summary: str,
+    context_records: List[dict],
+    user_question: str,
+    bookshelf_text: Optional[str] = None,
+):
+    blocked = safety_input_filter(vision_summary + " " + user_question)
+    if blocked:
         return blocked
 
-    user_prompt = build_pdf_prompt(report_text, user_question or "")
-    raw = _generate(BASE_SYSTEM_PROMPT, user_prompt)
+    guided_question = build_user_focused_question(user_question)
+
+    prompt = build_fusion_prompt(
+        vision_summary=vision_summary,
+        context_records=context_records,
+        user_question=guided_question,
+        history=_history_text(),
+    )
+
+    raw = _generate(BASE_SYSTEM_PROMPT, prompt)
     safe = sanitize_output(raw)
+
+    _append_history(user_question, safe)
     return safe
+
+
+# =============================================================
+# 4️⃣ PDF Explanation
+# =============================================================
+def generate_pdf_answer(report_text: str, user_question: Optional[str]) -> str:
+    combined = (user_question or "") + " " + report_text[:500]
+
+    blocked = safety_input_filter(combined)
+    if blocked:
+        return blocked
+
+    prompt = build_pdf_prompt(report_text, user_question or "")
+    raw = _generate(BASE_SYSTEM_PROMPT, prompt)
+    return sanitize_output(raw)

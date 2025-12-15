@@ -1,26 +1,25 @@
 # Backend/RAG/retriever.py
-"""
-PubMed Retriever for MedFusion-AI (Python 3.9 Compatible)
-
-Loads:
- - data/pubmed/index.faiss
- - data/pubmed/chunks.jsonl
-
-Retrieves top-k scientific evidence and sends it to LLM for grounded answer.
-"""
 
 import json
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Dict
 
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from Backend.llm.llama_client import generate_text_rag_answer
+from Backend.RAG.pubmed_fetch import (
+    fetch_pubmed_ids,
+    fetch_pubmed_article,
+    clean_text,
+    chunk_text,
+)
+from Backend.RAG.bookshelf_fetch import fetch_bookshelf_definition
 
 
-# ------------ Paths ------------
+# ======================================================
+# Paths
+# ======================================================
 DATA_DIR = Path("data") / "pubmed"
 CHUNKS_PATH = DATA_DIR / "chunks.jsonl"
 INDEX_PATH = DATA_DIR / "index.faiss"
@@ -28,133 +27,175 @@ INDEX_PATH = DATA_DIR / "index.faiss"
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
+# ======================================================
+# 🔥 Query intent detection
+# ======================================================
+def is_definition_query(question: str) -> bool:
+    keywords = [
+        "what is",
+        "define",
+        "definition",
+        "meaning of",
+        "explain",
+    ]
+    q = question.lower()
+    return any(k in q for k in keywords)
+
+
+def is_mechanism_query(question: str) -> bool:
+    keywords = [
+        "how does",
+        "pathophysiology",
+        "mechanism",
+        "what happens in",
+    ]
+    q = question.lower()
+    return any(k in q for k in keywords)
+
+
+# ======================================================
+# Retriever
+# ======================================================
 class PubMedRetriever:
-    def __init__(
-        self,
-        index_path=INDEX_PATH,
-        chunks_path=CHUNKS_PATH,
-        model_name=EMBED_MODEL,
-    ):
-        self.index_path = Path(index_path)
-        self.chunks_path = Path(chunks_path)
-        self.model_name = model_name
+    def __init__(self):
+        self._model = SentenceTransformer(EMBED_MODEL)
+        self._index = faiss.read_index(str(INDEX_PATH))
+        self._chunks: List[Dict] = []
 
-        self._index = None
-        self._chunks = None
-        self._embedder = None
+        with open(CHUNKS_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    self._chunks.append(json.loads(line))
+                except:
+                    continue
 
-    # -------------------------------
-    # Load everything lazily
-    # -------------------------------
-    def _ensure_loaded(self):
+    # --------------------------------------------------
+    # Compatibility method (DO NOT DELETE)
+    # --------------------------------------------------
+    def is_ready(self) -> bool:
+        return self._index is not None and len(self._chunks) > 0
 
-        if self._embedder is None:
-            self._embedder = SentenceTransformer(self.model_name)
+    # --------------------------------------------------
+    # Local FAISS search
+    # --------------------------------------------------
+    def _search(self, query: str, top_k: int):
+        q_emb = self._model.encode([query], convert_to_numpy=True).astype("float32")
+        D, I = self._index.search(q_emb, top_k)
 
-        if self._index is None:
-            if not self.index_path.exists():
-                raise FileNotFoundError(
-                    f"FAISS index missing at {self.index_path}. Run build_index.py first."
-                )
-            self._index = faiss.read_index(str(self.index_path))
+        results = []
+        for dist, idx in zip(D[0], I[0]):
+            if 0 <= idx < len(self._chunks):
+                results.append((self._chunks[idx], float(dist)))
+        return results
 
-        if self._chunks is None:
-            if not self.chunks_path.exists():
-                raise FileNotFoundError(
-                    f"Chunks file missing at {self.chunks_path}. Run build_index.py first."
-                )
-            self._chunks = []
-            with open(self.chunks_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        self._chunks.append(json.loads(line))
-                    except:
-                        continue
-
-    def is_ready(self):
-        try:
-            self._ensure_loaded()
+    # --------------------------------------------------
+    # Evidence quality check
+    # --------------------------------------------------
+    def _needs_refresh(self, results, threshold=0.35):
+        if not results:
             return True
-        except FileNotFoundError:
-            return False
+        sims = [1 - d for _, d in results]
+        return sum(sims) / len(sims) < threshold
 
-    # -------------------------------
-    # RETRIEVE RAW TEXT CHUNKS
-    # -------------------------------
-    def retrieve(self, user_query, top_k=5):
-        self._ensure_loaded()
+    # --------------------------------------------------
+    # Fetch + store new PubMed
+    # --------------------------------------------------
+    def _fetch_and_store(self, query: str, max_results=3):
+        pmids = fetch_pubmed_ids(query, max_results)
+        new_records = []
 
-        q_emb = self._embedder.encode([user_query], convert_to_numpy=True).astype("float32")
+        for pmid in pmids:
+            art = fetch_pubmed_article(pmid)
+            text = clean_text(f"{art['title']}. {art['abstract']}")
+            for i, ch in enumerate(chunk_text(text, max_tokens=384)):
+                new_records.append({
+                    "pmid": pmid,
+                    "text": ch,
+                })
 
-        if q_emb.ndim == 1:
-            q_emb = np.expand_dims(q_emb, 0)
+        if not new_records:
+            return
 
-        distances, indices = self._index.search(q_emb, top_k)
+        vecs = self._model.encode(
+            [r["text"] for r in new_records],
+            convert_to_numpy=True
+        ).astype("float32")
 
-        results = []
-        for dist, idx in zip(distances[0], indices[0]):
-            if 0 <= idx < len(self._chunks):
-                results.append((self._chunks[idx]["text"], float(dist)))
+        self._index.add(vecs)
+        faiss.write_index(self._index, str(INDEX_PATH))
 
-        return results
+        with open(CHUNKS_PATH, "a", encoding="utf-8") as f:
+            for r in new_records:
+                f.write(json.dumps(r) + "\n")
+                self._chunks.append(r)
 
-    # -------------------------------
-    # RETRIEVE FULL RECORDS
-    # -------------------------------
-    def retrieve_with_records(self, user_query, top_k=5):
-        self._ensure_loaded()
+    # --------------------------------------------------
+    # 🔥 MAIN retrieval (IMPROVED)
+    # --------------------------------------------------
+    def retrieve(self, query: str, top_k: int = 6):
+        results = self._search(query, top_k)
 
-        q_emb = self._embedder.encode([user_query], convert_to_numpy=True).astype("float32")
+        if self._needs_refresh(results):
+            self._fetch_and_store(query)
+            results = self._search(query, top_k)
 
-        if q_emb.ndim == 1:
-            q_emb = np.expand_dims(q_emb, 0)
+        # 🔥 semantic categorization
+        definition_support = []
+        mechanism_support = []
+        research_support = []
 
-        distances, indices = self._index.search(q_emb, top_k)
+        for rec, _ in results:
+            txt = rec["text"].lower()
 
-        results = []
-        for dist, idx in zip(distances[0], indices[0]):
-            if 0 <= idx < len(self._chunks):
-                rec = self._chunks[idx]
-                results.append((rec, float(dist)))
+            if any(k in txt for k in ["is a", "refers to", "defined as"]):
+                definition_support.append(rec)
 
-        return results
+            elif any(k in txt for k in ["pathophysiology", "mechanism", "airway inflammation"]):
+                mechanism_support.append(rec)
 
+            else:
+                research_support.append(rec)
 
-# ---------- Singleton retriever ----------
-_RETRIEVER_SINGLETON = None
-
-def get_retriever(force_new=False):
-    global _RETRIEVER_SINGLETON
-    if _RETRIEVER_SINGLETON is None or force_new:
-        _RETRIEVER_SINGLETON = PubMedRetriever()
-    return _RETRIEVER_SINGLETON
+        return {
+            "definition_support": definition_support[:2],
+            "mechanism_support": mechanism_support[:2],
+            "research_support": research_support[:2],
+        }
 
 
-# ---------- High-level Answer Function ----------
-def answer_pubmed_question(user_question, top_k=5, return_contexts=False):
-    retriever = get_retriever()
+# ======================================================
+# Public API (DO NOT DELETE)
+# ======================================================
+_retriever = PubMedRetriever()
 
-    if not retriever.is_ready():
-        return "⚠️ PubMed index not found. Please run Backend/RAG/build_index.py."
 
-    records = retriever.retrieve_with_records(user_question, top_k=top_k)
-    context_texts = [rec["text"] for (rec, dist) in records]
+def answer_pubmed_question(user_question: str, top_k: int = 5):
+    """
+    High-level API used by legacy components.
+    Now returns structured evidence + optional Bookshelf.
+    """
 
-    if not context_texts:
-        out = "⚠️ No relevant PubMed passages found."
-        return {"answer": out, "contexts": []} if return_contexts else out
+    if not _retriever.is_ready():
+        return "⚠️ PubMed index not found. Please build index first."
 
-    answer = generate_text_rag_answer(context_texts, user_question)
+    buckets = _retriever.retrieve(user_question, top_k)
 
-    if return_contexts:
-        ctx = []
-        for rec, dist in records:
-            ctx.append({
-                "text": rec.get("text"),
-                "pmid": rec.get("pmid"),
-                "chunk_id": rec.get("chunk_id"),
-                "distance": dist,
-            })
-        return {"answer": answer, "contexts": ctx}
+    # 🔥 Bookshelf only for definitions
+    bookshelf_text = None
+    if is_definition_query(user_question):
+        bookshelf_text = fetch_bookshelf_definition(user_question)
 
-    return answer
+    # Flatten evidence for LLM compatibility
+    context_records = (
+        buckets["definition_support"] +
+        buckets["mechanism_support"] +
+        buckets["research_support"]
+    )
+
+    pmids = list(dict.fromkeys([r["pmid"] for r in context_records]))
+
+    return {
+        "contexts": context_records,
+        "pmids": pmids,
+        "bookshelf": bookshelf_text,
+    }

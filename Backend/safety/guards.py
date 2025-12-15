@@ -1,4 +1,5 @@
 # Backend/safety/guards.py
+
 import re
 from typing import Optional, List
 
@@ -11,23 +12,23 @@ from .patterns import (
 )
 
 # ------------------------------------------------------------
-# Default Safety Message (same everywhere in system)
+# Default Safety Message (used across entire project)
 # ------------------------------------------------------------
 DEFAULT_SAFETY_MESSAGE = (
-    "⚠️ This system is for assistance and knowledge purposes only.\n"
+    "⚠️ This system is for assistance and educational purposes only.\n"
     "It is NOT a doctor and may make mistakes.\n"
-    "Please consult a qualified doctor or medical professional for real medical advice."
+    "Always consult a qualified medical professional for real medical advice."
 )
 
 # ------------------------------------------------------------
-# Generic pattern matching
+# Generic pattern matcher
 # ------------------------------------------------------------
 def _match_any(text: str, patterns: List[str]) -> bool:
     lower = text.lower()
     return any(p in lower for p in patterns)
 
 # ------------------------------------------------------------
-# Individual checks
+# Individual safety checks
 # ------------------------------------------------------------
 def check_emergency(text: str) -> bool:
     return _match_any(text, EMERGENCY_PATTERNS)
@@ -45,11 +46,12 @@ def check_sensitive_case(text: str) -> bool:
     return _match_any(text, SENSITIVE_PATTERNS)
 
 # ------------------------------------------------------------
-# PHI Redaction (PDF Safety)
+# PHI REDACTION (PDF safety)
 # ------------------------------------------------------------
 def redact_phi(text: str) -> str:
-    """Redacts emails, phone numbers, dates, and names from medical reports."""
-    # Emails
+    """Redacts personal identifiers before sending report to LLM."""
+
+    # Email addresses
     text = re.sub(r"\b[\w\.-]+@[\w\.-]+\.\w+\b", "[REDACTED_EMAIL]", text)
 
     # Phone numbers
@@ -65,10 +67,10 @@ def redact_phi(text: str) -> str:
     return text
 
 # ------------------------------------------------------------
-# Text trimming for PDF → LLM
+# TEXT TRIMMING
 # ------------------------------------------------------------
 def trim_text(text: str, max_chars: int = 12000):
-    """Returns (trimmed_text, was_trimmed_boolean)."""
+    """Trims medical report for LLM token safety."""
     if len(text) <= max_chars:
         return text, False
     return text[:max_chars] + "\n\n[TRUNCATED]", True
@@ -77,43 +79,69 @@ def trim_text(text: str, max_chars: int = 12000):
 # INPUT SAFETY FILTER
 # ------------------------------------------------------------
 def safety_input_filter(user_text: str) -> Optional[str]:
-    """Returns an error message if unsafe; otherwise None."""
+    """
+    Returns a blocking safety message if unsafe.
+    Otherwise returns None.
+    """
 
     if check_emergency(user_text):
         return (
-            "🚨 This may indicate a medical emergency.\n"
+            "🚨 This appears to describe a potential medical emergency.\n"
             "Please seek immediate medical attention.\n\n"
             + DEFAULT_SAFETY_MESSAGE
         )
 
     if check_dosage(user_text):
         return (
-            "⚠️ I cannot provide medicine names, dosages, or prescriptions.\n\n"
+            "⚠️ I cannot provide medicine names, dosages, or prescription guidance.\n\n"
             + DEFAULT_SAFETY_MESSAGE
         )
 
     if check_surgery(user_text):
         return (
-            "⚠️ I cannot advise on surgical decisions or procedures.\n\n"
+            "⚠️ I cannot provide guidance on surgical procedures or decisions.\n\n"
             + DEFAULT_SAFETY_MESSAGE
         )
 
     if check_sensitive_case(user_text):
         return (
-            "⚠️ This query involves pregnancy, infants, or children.\n"
-            "Such cases require direct medical supervision.\n\n"
+            "⚠️ This involves pregnancy or children — these cases require direct medical supervision.\n\n"
             + DEFAULT_SAFETY_MESSAGE
         )
 
-    # Diagnosis requests allowed, but LLM output safely neutralized
+    # Diagnosis questions allowed but will be neutralized in output
     return None
 
 # ------------------------------------------------------------
-# OUTPUT SANITIZATION (VERY IMPORTANT)
+# OUTPUT SANITIZATION (Post-LLM Safety)
 # ------------------------------------------------------------
 def sanitize_output(text: str) -> str:
-    """Prevents LLM from making diagnoses or giving prescriptions."""
+    """
+    Removes prompt leakage, fixes formatting,
+    neutralizes unsafe claims, and appends disclaimer once.
+    """
 
+    if not text:
+        return text
+
+    # ====================================================
+    # 🧹 ADDITION 1: REMOVE PROMPT / INSTRUCTION LEAKS
+    # ====================================================
+    leak_patterns = [
+        r"=+\s*EXPLANATION REQUIREMENTS.*?\n",
+        r"=+\s*PUBMED EVIDENCE.*?\n",
+        r"=+\s*DISCLAIMER.*?\n",
+        r"EXPLANATION REQUIREMENTS",
+        r"PUBMED EVIDENCE\s*\(USE THIS\)",
+        r"DISCLAIMER\s*={2,}.*",
+    ]
+
+    for pattern in leak_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.DOTALL)
+
+    # ====================================================
+    # 🔒 YOUR EXISTING SAFETY LOGIC (UNCHANGED)
+    # ====================================================
     forbidden_phrases = [
         "this confirms you have",
         "you definitely have",
@@ -130,18 +158,37 @@ def sanitize_output(text: str) -> str:
     ]
 
     lower = text.lower()
+
     for phrase in forbidden_phrases:
         if phrase in lower:
             text = re.sub(
                 re.escape(phrase),
-                "this may suggest but does NOT confirm (consult a clinician)",
+                "this may suggest something, but does NOT confirm anything (please consult a clinician)",
                 text,
                 flags=re.IGNORECASE,
             )
             lower = text.lower()
 
-    # Always add safety message
+    # ====================================================
+    # 🧹 ADDITION 2: REMOVE DUPLICATE DISCLAIMERS
+    # ====================================================
+    disclaimer_regex = re.escape(DEFAULT_SAFETY_MESSAGE)
+    text = re.sub(
+        f"({disclaimer_regex}\\s*)+",
+        DEFAULT_SAFETY_MESSAGE + "\n",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # ====================================================
+    # 🧹 ADDITION 3: FORMAT CLEANUP
+    # ====================================================
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    # ====================================================
+    # 🔚 YOUR EXISTING DISCLAIMER GUARANTEE
+    # ====================================================
     if DEFAULT_SAFETY_MESSAGE not in text:
-        text += "\n\n" + DEFAULT_SAFETY_MESSAGE
+        text = text.rstrip() + "\n\n" + DEFAULT_SAFETY_MESSAGE
 
     return text

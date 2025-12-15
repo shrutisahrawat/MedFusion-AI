@@ -2,104 +2,158 @@ import sys
 from pathlib import Path
 import streamlit as st
 
-# Ensure Backend is importable
+# --------------------------------------------------
+# Make Backend importable
+# --------------------------------------------------
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT_DIR))
 
-# ---------------------- Imports ----------------------
-from Backend.RAG.retriever import answer_pubmed_question, PubMedRetriever
+# --------------------------------------------------
+# Imports
+# --------------------------------------------------
+from Backend.RAG.retriever import PubMedRetriever
 from Backend.safety.guards import safety_input_filter, sanitize_output
 from Backend.llm.llama_client import generate_text_rag_answer
 
 
-# ---------------------- UI ----------------------
+# ==================================================
+# HELPER: merge retriever outputs safely
+# ==================================================
+def merge_retrieved_evidence(result_dict, top_k=6):
+    """
+    Merge definition / mechanism / research evidence
+    into a single clean list for the LLM.
+    """
+    merged = []
+
+    for key in ("definition_support", "mechanism_support", "research_support"):
+        merged.extend(result_dict.get(key, []))
+
+    # Deduplicate by PMID + text
+    seen = set()
+    cleaned = []
+
+    for rec in merged:
+        pmid = rec.get("pmid", "N/A")
+        text = rec.get("text", "").strip()
+
+        sig = (pmid, text)
+        if sig not in seen and text:
+            cleaned.append({"pmid": pmid, "text": text})
+            seen.add(sig)
+
+    return cleaned[:top_k]
+
+
+# ==================================================
+# UI
+# ==================================================
+st.set_page_config(page_title="PubMed Research Assistant", layout="centered")
+
 st.title("📚 PubMed Research Assistant")
-st.caption("Ask medical questions and receive PubMed-grounded responses. (Educational use only)")
-
-# Quick check if index exists
-retriever = PubMedRetriever()
-if not retriever.is_ready():
-    st.error("❌ PubMed index not found.\nPlease run the index builder before using this tool.")
-    st.stop()
-
-
-# ---------------------- Main Input ----------------------
-user_query = st.text_input(
-    "Ask a medical research question:",
-    placeholder="e.g., What does PubMed say about pneumonia complications?"
+st.caption(
+    "Evidence-based medical explanations using PubMed research "
+    "(Educational use only — NOT a diagnosis)."
 )
 
-ask_btn = st.button("Search & Generate Answer")
+retriever = PubMedRetriever()
 
 
-# ---------------------- Processing ----------------------
-if ask_btn:
+# ==================================================
+# MAIN QUESTION
+# ==================================================
+user_query = st.text_input(
+    "Ask a medical research question:",
+    placeholder="e.g., What is asthma?"
+)
+
+if st.button("Search & Explain"):
+
     if not user_query.strip():
         st.warning("Please enter a question.")
         st.stop()
 
-    # Safety check BEFORE doing any work
+    # Safety check
     blocked = safety_input_filter(user_query)
     if blocked:
         st.warning(blocked)
         st.stop()
 
-    with st.spinner("Retrieving PubMed evidence..."):
-        results = retriever.retrieve(user_query, top_k=5)
+    # ---------------- Retrieval ----------------
+    with st.spinner("🔎 Retrieving relevant PubMed evidence..."):
+        retrieval = retriever.retrieve(user_query)
 
-    if not results:
-        st.error("❌ No relevant PubMed passages found.")
+    context_records = merge_retrieved_evidence(retrieval)
+
+    if not context_records:
+        st.error("❌ No relevant PubMed evidence found.")
         st.stop()
 
-    # Extract retrieved chunks only
-    context_chunks = [chunk for chunk, dist in results]
+    # ---------------- Evidence Display ----------------
+    with st.expander("📖 PubMed Evidence Used"):
+        for i, rec in enumerate(context_records, start=1):
+            st.markdown(
+                f"**Snippet {i} — PMID {rec['pmid']}**\n\n"
+                f"{rec['text']}\n\n---"
+            )
 
-    # Display retrieved evidence
-    with st.expander("📖 Retrieved PubMed Context Snippets"):
-        for i, chunk in enumerate(context_chunks, start=1):
-            st.markdown(f"**Context {i}:**\n{chunk}\n---")
+    # ---------------- LLM Explanation ----------------
+    with st.spinner("🧠 Generating evidence-based explanation..."):
+        answer = generate_text_rag_answer(
+            context_records=context_records,
+            user_question=user_query
+        )
 
-    # Generate LLM answer
-    with st.spinner("Generating grounded explanation..."):
-        llm_answer = generate_text_rag_answer(context_chunks, user_query)
-        safe_output = sanitize_output(llm_answer)
-
-    st.subheader("🧠 AI Answer (PubMed-Grounded)")
-    st.markdown(safe_output)
+    st.subheader("🧠 AI Explanation (PubMed-Grounded)")
+    st.markdown(sanitize_output(answer))
 
 
-# ---------------------- Follow-Up Questions (Late Fusion Extension) ----------------------
+# ==================================================
+# FOLLOW-UP QUESTIONS
+# ==================================================
 st.divider()
-st.subheader("💬 Ask a Follow-up Question")
+st.subheader("💬 Ask a Follow-Up Question")
 
 follow_q = st.text_input(
-    "Enter follow-up question:",
-    placeholder="e.g., What specialists deal with this condition?"
+    "Enter a follow-up question:",
+    placeholder="e.g., What complications of asthma are reported in PubMed?"
 )
 
-if st.button("Ask Follow-up"):
+if st.button("Ask Follow-Up"):
+
     if not follow_q.strip():
-        st.warning("Please type a follow-up question.")
+        st.warning("Please enter a follow-up question.")
         st.stop()
 
-    blocked2 = safety_input_filter(follow_q)
-    if blocked2:
-        st.warning(blocked2)
+    blocked = safety_input_filter(follow_q)
+    if blocked:
+        st.warning(blocked)
         st.stop()
 
-    with st.spinner("Retrieving updated PubMed results..."):
-        new_results = retriever.retrieve(follow_q, top_k=5)
+    # ---------------- Retrieval ----------------
+    with st.spinner("🔎 Retrieving updated PubMed evidence..."):
+        retrieval = retriever.retrieve(follow_q)
 
-    follow_chunks = [c for c, d in new_results]
+    follow_records = merge_retrieved_evidence(retrieval)
 
-    with st.expander("📖 Evidence Snippets Used"):
-        for i, chunk in enumerate(follow_chunks, 1):
-            st.markdown(f"**Context {i}:**\n{chunk}\n---")
+    if not follow_records:
+        st.error("❌ No relevant PubMed evidence found.")
+        st.stop()
 
-    # Answer using RAG + LLM
-    with st.spinner("Generating explanation..."):
-        response = generate_text_rag_answer(follow_chunks, follow_q)
-        safe_follow = sanitize_output(response)
+    # ---------------- Evidence Display ----------------
+    with st.expander("📖 PubMed Evidence Used"):
+        for i, rec in enumerate(follow_records, start=1):
+            st.markdown(
+                f"**Snippet {i} — PMID {rec['pmid']}**\n\n"
+                f"{rec['text']}\n\n---"
+            )
 
-    st.markdown("### 🧠 Follow-up Answer")
-    st.markdown(safe_follow)
+    # ---------------- LLM Answer ----------------
+    with st.spinner("🧠 Generating explanation..."):
+        follow_answer = generate_text_rag_answer(
+            context_records=follow_records,
+            user_question=follow_q
+        )
+
+    st.subheader("🧠 Follow-Up Answer")
+    st.markdown(sanitize_output(follow_answer))
